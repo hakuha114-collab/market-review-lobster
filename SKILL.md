@@ -855,33 +855,95 @@ delivery:
 
 ---
 
-## 实时数据获取工作流
+## 实时数据获取工作流（核心）
 
-本 Skill 依赖实时市场数据，需通过 ProSearch 工具并行搜索获取。以下是标准数据获取流程：
+> ⚠️ **重要**：SKILL.md 本身只是文档。**真正可执行的是 `scripts/fetch_market_data.py` 脚本**。
+> 其他 agent 必须调用这个脚本才能获取实时数据，不能只读文档。
 
-### 美股报告数据获取（6组并行搜索）
+### 一键获取全部市场数据（推荐）
+
+```bash
+# 获取 A股港股数据（T日 + T-1日，共 12 个查询，耗时约 60 秒）
+python skills/white-market-review-lobster/scripts/fetch_market_data.py --market ah --date 2026-04-16
+
+# 获取 美股数据（T日 + T-1日 + VIX，共 13 个查询）
+python skills/white-market-review-lobster/scripts/fetch_market_data.py --market us --date 2026-04-16
+
+# 获取 全部市场数据（A股港股 + 美股）
+python skills/white-market-review-lobster/scripts/fetch_market_data.py --market all
+
+# 仅获取 VIX 数据
+python skills/white-market-review-lobster/scripts/fetch_market_data.py --vix-only
+```
+
+脚本会自动：
+1. 调用 `vix-index` skill 获取 VIX（美股报告）
+2. 通过 Gateway (`AUTH_GATEWAY_PORT`) 并行调用 ProSearch API
+3. 保存结果到 `skills/white-market-review-lobster/data/market_data_YYYYMMDD.json`
+4. 输出汇总报告
+
+### 数据获取参数说明
+
+| 参数 | 说明 | 示例 |
+|------|------|------|
+| `--market ah` | A股港股（默认） | 12 个查询 |
+| `--market us` | 美股（含 VIX） | 13 个查询 |
+| `--market all` | 全部市场 | 25 个查询 |
+| `--date YYYY-MM-DD` | 指定日期 | `--date 2026-04-16` |
+| `--vix-only` | 仅获取 VIX | 快速查询 |
+
+### 脚本输出示例
 
 ```
-搜索 1: 2026年4月15日 美股收盘 纳斯达克 标普500 道琼斯
-搜索 2: 2026年4月16日 美股收盘 纳斯达克 标普500 道琼斯
-搜索 3: 2026年4月15日 美股板块 资金流向 科技 金融 能源
-搜索 4: 2026年4月16日 美股板块 资金流向 科技 金融 能源
-搜索 5: 2026年4月15日 美股 VIX 恐慌指数
-搜索 6: 2026年4月16日 美股 VIX 恐慌指数
+[23:40:27] Market Review Pro 数据获取
+  市场: A股港股
+  日期: 2026-04-16
+  Gateway: 127.0.0.1:19000
+============================================================
+[A股港股数据]
+[4/7] A股港股 T日数据...
+[ProSearch] 发起 6 个并行查询...
+  -> 2026-04-16 A股收盘 上证指数...
+  <- [OK] OK
+  ...
+[ProSearch] 完成: 6/6 成功
+[5/7] A股港股 T-1 数据...
+[ProSearch] 发起 6 个并行查询...
+  ...
+[ProSearch] 完成: 6/6 成功
+============================================================
+[汇总] 12/12 查询成功 (100%)
+[保存] -> skills/white-market-review-lobster/data/market_data_20260416.json
 ```
 
-> **注意**：美股报告需调用 `vix-index` skill 获取 VIX 数据，作为 P0 优先级数据源。
+### 读取脚本生成的数据
 
-### A股港股报告数据获取（6组并行搜索）
+脚本保存的数据结构：
 
+```json
+{
+  "timestamp": "2026-04-16 22:00:00",
+  "date": "2026-04-16",
+  "market": "ah",
+  "data": {
+    "vix": { "success": true, "data": { "vix": { "price": 17.9 } } },
+    "ah": {
+      "summary": { "total": 6, "success": 6 },
+      "results": {
+        "a_index": { "success": true, "data": {...} },
+        "a_sector": { "success": true, "data": {...} },
+        "a_limitup": { "success": true, "data": {...} },
+        "hk_index": { "success": true, "data": {...} },
+        "northbound": { "success": true, "data": {...} },
+        "jp_kr": { "success": true, "data": {...} }
+      }
+    },
+    "ah_t1": { "summary": { "total": 6, "success": 6 }, "results": {...} }
+  }
+}
 ```
-搜索 1: 2026年4月16日 A股收盘 上证指数 深证成指 创业板指 成交额
-搜索 2: 2026年4月16日 A股板块 资金流向 净流入 净流出 TOP5
-搜索 3: 2026年4月16日 A股 涨停 连板 封板率 晋级率
-搜索 4: 2026年4月16日 港股收盘 恒生指数 恒生科技 南向资金
-搜索 5: 2026年4月16日 北向资金 净流入 沪股通 深股通
-搜索 6: 2026年4月16日 日韩股市 日经225 韩国KOSPI 收盘
-```
+
+其他 agent 可读取 JSON 文件获取所有数据，然后填充到报告模板中。
 
 ### 数据获取最佳实践
 
@@ -923,18 +985,33 @@ delivery:
 
 ## 工具与 Skill 调用详解
 
-### ProSearch 工具调用
+> ⚠️ **核心原则**：本 Skill 提供了一个**可执行脚本** `scripts/fetch_market_data.py`。
+> 其他 agent **必须运行这个脚本** 才能真正获取数据。
+> 不要只读 SKILL.md 文档——文档不会自动执行！
 
-ProSearch 是本 Skill 的核心数据获取工具。调用方式：
+### 推荐方式：运行数据获取脚本（⭐）
+
+```bash
+# 方式 1：运行脚本（⭐ 推荐，其他 agent 必须这样做）
+python skills/white-market-review-lobster/scripts/fetch_market_data.py --market ah --date 2026-04-16
+
+# 方式 2：仅获取 VIX
+python skills/white-market-review-lobster/scripts/fetch_market_data.py --vix-only
+```
+
+脚本完成后，数据保存在 `skills/white-market-review-lobster/data/market_data_YYYYMMDD.json`。
+其他 agent 读取该 JSON 文件，提取数据填充到报告模板中。
+
+### 直接调用 ProSearch（备用方案）
+
+如需单独调用 ProSearch，格式如下：
 
 ```yaml
-# 工具调用格式（内部实现）
 tool: ProSearch
 parameters:
   query: "2026年4月16日 A股收盘 上证指数 深证成指 创业板指"
-  # 可选参数
-  freshness: "day"  # day/week/month/year
-  count: 10         # 返回结果数量
+  freshness: "day"
+  count: 10
 ```
 
 **并行调用策略：**
@@ -974,40 +1051,30 @@ parameters:
 
 ### 完整调用流程示例
 
-#### 美股报告生成流程
+#### 美股报告生成流程（⭐ 推荐使用脚本）
 
 ```
-Step 1: 调用 vix-index skill 获取 VIX 数据
+Step 1: 运行数据获取脚本
+        python scripts/fetch_market_data.py --market us --date 2026-04-16
         ↓
-Step 2: 并行发起 6 个 ProSearch 查询
-        - 美股指数（T日）
-        - 美股指数（T-1日）
-        - 美股板块（T日）
-        - 美股板块（T-1日）
-        - VIX 相关（备用）
-        - 宏观事件/美联储
+Step 2: 读取生成的数据文件
+        data/market_data_20260416.json
         ↓
-Step 3: 等待所有查询返回（超时 60 秒）
+Step 3: 数据清洗与结构化
         ↓
-Step 4: 数据清洗与结构化
+Step 4: 生成报告（十一大模块）
         ↓
-Step 5: 生成报告（十一大模块）
-        ↓
-Step 6: 输出到指定渠道
+Step 5: 输出到指定渠道
 ```
 
-#### A股港股报告生成流程
+#### A股港股报告生成流程（⭐ 推荐使用脚本）
 
 ```
-Step 1: 并行发起 6 个 ProSearch 查询
-        - A股指数 + 成交额
-        - A股板块资金流向
-        - A股涨停/连板数据
-        - 港股指数 + 南向资金
-        - 北向资金数据
-        - 日韩股市数据
+Step 1: 运行数据获取脚本
+        python scripts/fetch_market_data.py --market ah --date 2026-04-16
         ↓
-Step 2: 等待所有查询返回（超时 60 秒）
+Step 2: 读取生成的数据文件
+        data/market_data_20260416.json
         ↓
 Step 3: 数据清洗与结构化
         ↓
